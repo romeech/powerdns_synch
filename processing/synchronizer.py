@@ -10,7 +10,7 @@ from db.selectors import (
     get_powerdns_report_dict,
 )
 
-from utils.utils import split_to_chunks
+from utils.utils import flatten_list, split_to_chunks
 from utils.decorators import log_start_end
 
 
@@ -19,6 +19,17 @@ MAX_UPD_SIZE = 650
 MAX_DEL_SIZE = 3500
 
 logger = logging.getLogger(__name__)
+
+
+def group_powerdns_recs_by_record_hash(powerdns_records):
+    """
+    [(rec_id, ..., rec_hash,...), ...] -> {rec_hash: [(rec_id,...),], ...}
+    """
+    sorted_by_rec_hash = sorted(powerdns_records, key=lambda row: row[8])
+    return {
+        rec_hash: list(recs)
+        for rec_hash, recs in groupby(sorted_by_rec_hash, key=lambda row: row[8])
+    }
 
 
 # @measure_worktime
@@ -34,25 +45,25 @@ def match_dns_records(powerdns_records, hub_dns_records):
     #   (rec_id, idn_host, rr_type, rec_data, ttl, prio, domain_id,
     #    domain_name, rec_hash, ttl_hash),
     # ]
-    pdns_recs_sorted_by_rec_hash = sorted(powerdns_records, key=lambda row: row[8])
-    unique_pdns_recs = {
-        rec_hash: recs[0]
-        for rec_hash, recs in groupby(pdns_recs_sorted_by_rec_hash, key=lambda row: row[8])
-    }
-    pdns_rec_hashes = set(unique_pdns_recs.keys())
+    pdns_rec_hash_grps = group_powerdns_recs_by_record_hash(powerdns_records)
+    unique_pdns_recs = {rec_hash: recs[0] for rec_hash, recs in pdns_rec_hash_grps.items()}
+    duplicate_pdns_recs = flatten_list([recs[1:] for _, recs in pdns_rec_hash_grps.items()])
 
+    duplicate_ids = {row[0] for row in duplicate_pdns_recs}
+
+    pdns_rec_hashes = set(unique_pdns_recs.keys())
     phantom_recs = pdns_rec_hashes.difference(hub_rechash2ttl.keys())
     matching_recs = pdns_rec_hashes.intersection(hub_rechash2ttl.keys())
 
     del_set = {
         rec_id
-        for rec_hash, (rec_id, _, _, _, _, _, _, _, rec_hash, _) in unique_pdns_recs
+        for rec_hash, (rec_id, _, _, _, _, _, _, _, _, _) in unique_pdns_recs.items()
         if rec_hash in phantom_recs
-    }
+    }.union(duplicate_ids)
 
     upd_map = {
-        rec_id: hub_rechash2ttl[rec_hash]
-        for rec_hash, (rec_id, _, _, _, _, _, _, _, rec_hash, ttl_hash) in unique_pdns_recs
+        rec_id: hub_rechash2ttl[rec_hash]  # relevant TTL value
+        for rec_hash, (rec_id, _, _, _, _, _, _, _, _, ttl_hash) in unique_pdns_recs.items()
         if (ttl_hash not in hub_ttl_hashes) and (rec_hash in matching_recs)
     }
 
